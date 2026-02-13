@@ -28,13 +28,13 @@ if [ -d "$RESULTS_DIR" ] && [ "$(ls -A $RESULTS_DIR 2>/dev/null)" ]; then
             echo "---"
             
             # Préparer le message Discord (échapper proprement pour JSON)
-            MESSAGE=$(cat "$NEW_FILE" | head -25 | while read domain; do
-                echo "• $domain"
+            MESSAGE=$(cat "$NEW_FILE" | head -500 | while read domain; do
+                echo "$domain"
             done | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
             
             # Footer si trop de domaines
-            if [ "$COUNT" -gt 25 ]; then
-                FOOTER="\\n\\n... et $((COUNT - 25)) autres domaines"
+            if [ "$COUNT" -gt 500 ]; then
+                FOOTER="\\n\\n... et $((COUNT - 500)) autres domaines"
             else
                 FOOTER=""
             fi
