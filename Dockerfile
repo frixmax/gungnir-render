@@ -1,10 +1,9 @@
 FROM python:3.11-alpine
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl jq
 
 WORKDIR /app
 
-# Installer requests (pour crt.sh) au lieu de certstream
 RUN pip install --no-cache-dir requests
 
 COPY domains.txt .

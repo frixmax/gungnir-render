@@ -27,39 +27,51 @@ if [ -d "$RESULTS_DIR" ] && [ "$(ls -A $RESULTS_DIR 2>/dev/null)" ]; then
             cat "$NEW_FILE"
             echo "---"
             
-            # Préparer le message Discord (échapper les caractères spéciaux)
-            MESSAGE=$(cat "$NEW_FILE" | head -25 | sed 's/"/\\"/g' | awk '{print "• " $0}' | paste -sd '\n' -)
+            # Préparer le message Discord (échapper proprement pour JSON)
+            MESSAGE=$(cat "$NEW_FILE" | head -25 | while read domain; do
+                echo "• $domain"
+            done | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
             
-            # Notification Discord
+            # Footer si trop de domaines
             if [ "$COUNT" -gt 25 ]; then
                 FOOTER="\\n\\n... et $((COUNT - 25)) autres domaines"
             else
                 FOOTER=""
             fi
             
-            # Construire le JSON proprement
-            JSON_PAYLOAD=$(cat <<EOF
-{
-  "embeds": [{
-    "title": "🎯 Nouveaux sous-domaines détectés",
-    "description": "**${COUNT}** nouveaux domaines trouvés",
-    "color": 65280,
-    "fields": [{
-      "name": "Domaines",
-      "value": "\`\`\`\n${MESSAGE}${FOOTER}\n\`\`\`"
-    }],
-    "footer": {
-      "text": "Gungnir CT Monitor"
-    },
-    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  }]
-}
-EOF
-)
+            # Créer le payload JSON avec jq pour un échappement parfait
+            if command -v jq >/dev/null 2>&1; then
+                # Utiliser jq si disponible (meilleur échappement)
+                PAYLOAD=$(jq -n \
+                    --arg count "$COUNT" \
+                    --arg message "$MESSAGE" \
+                    --arg footer "$FOOTER" \
+                    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    '{
+                        embeds: [{
+                            title: "🎯 Nouveaux sous-domaines détectés",
+                            description: ("**" + $count + "** nouveaux domaines trouvés"),
+                            color: 65280,
+                            fields: [{
+                                name: "Domaines",
+                                value: ("```\n" + $message + $footer + "\n```")
+                            }],
+                            footer: {
+                                text: "Gungnir CT Monitor"
+                            },
+                            timestamp: $timestamp
+                        }]
+                    }')
+            else
+                # Fallback sans jq (échappement basique)
+                MESSAGE_ESCAPED=$(echo "$MESSAGE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+                PAYLOAD="{\"embeds\":[{\"title\":\"🎯 Nouveaux sous-domaines détectés\",\"description\":\"**${COUNT}** nouveaux domaines trouvés\",\"color\":65280,\"fields\":[{\"name\":\"Domaines\",\"value\":\"\`\`\`\\n${MESSAGE_ESCAPED}${FOOTER}\\n\`\`\`\"}],\"footer\":{\"text\":\"Gungnir CT Monitor\"},\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}"
+            fi
             
+            # Envoyer à Discord
             RESPONSE=$(curl -s -X POST "$DISCORD_WEBHOOK" \
                 -H "Content-Type: application/json" \
-                -d "$JSON_PAYLOAD")
+                -d "$PAYLOAD")
             
             if echo "$RESPONSE" | grep -q "code"; then
                 echo "❌ Discord error: $RESPONSE"
