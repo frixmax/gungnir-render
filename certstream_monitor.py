@@ -7,7 +7,7 @@ from datetime import datetime
 DOMAINS_FILE = 'domains.txt'
 OUTPUT_DIR = 'results'
 FIRST_RUN_FILE = '/app/.first_run_complete'
-CHECK_INTERVAL = 600  # Vérifier toutes les 5 minutes
+CHECK_INTERVAL = 300  # Attendre 5 minutes APRÈS la fin du cycle
 
 # Charger les domaines à surveiller
 with open(DOMAINS_FILE, 'r') as f:
@@ -76,18 +76,27 @@ def monitor_loop():
     global is_first_run
     
     print("Starting Certificate Transparency monitor with crt.sh...")
-    print(f"Checking every {CHECK_INTERVAL} seconds\n")
+    print(f"Waiting {CHECK_INTERVAL} seconds after each complete cycle\n")
+    
+    cycle_number = 0
     
     while True:
         try:
+            cycle_number += 1
+            cycle_start = time.time()
+            
             # VÉRIFIER le statut d'initialisation au début de chaque cycle
             is_first_run = not os.path.exists(FIRST_RUN_FILE)
             
-            for target in target_domains:
+            print(f"\n{'='*80}")
+            print(f"CYCLE #{cycle_number} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*80}")
+            
+            for idx, target in enumerate(target_domains, 1):
                 if is_first_run:
-                    print(f"\nInitializing {target}...", end=" ", flush=True)
+                    print(f"\n[{idx}/{len(target_domains)}] Initializing {target}...", end=" ", flush=True)
                 else:
-                    print(f"\nChecking certificates for {target}...")
+                    print(f"\n[{idx}/{len(target_domains)}] Checking {target}...", end=" ", flush=True)
                 
                 certificates = get_certificates_from_crtsh(target)
                 
@@ -111,6 +120,13 @@ def monitor_loop():
                 # Pause entre chaque domaine
                 time.sleep(2)
             
+            # Calculer la durée du cycle
+            cycle_duration = int(time.time() - cycle_start)
+            
+            print(f"\n{'='*80}")
+            print(f"CYCLE #{cycle_number} TERMINÉ - Durée: {cycle_duration}s ({cycle_duration//60}m {cycle_duration%60}s)")
+            print(f"{'='*80}")
+            
             # Après le premier cycle complet
             if is_first_run:
                 print("\n" + "="*80)
@@ -128,7 +144,7 @@ def monitor_loop():
                     print("Initializing seen_domains.txt...")
                     os.system('./notify.sh')
             
-            print(f"\nWaiting {CHECK_INTERVAL} seconds before next check...")
+            print(f"\nWaiting {CHECK_INTERVAL} seconds before next cycle...")
             time.sleep(CHECK_INTERVAL)
             
         except KeyboardInterrupt:
@@ -141,3 +157,30 @@ def monitor_loop():
 
 if __name__ == "__main__":
     monitor_loop()
+```
+
+## **Changements principaux :**
+
+✅ **Cycle complet garanti** - attend que TOUS les domaines soient traités
+✅ **Compteur de progression** - `[3/73] Checking domain...`
+✅ **Durée du cycle affichée** - tu sais combien de temps ça prend
+✅ **5 minutes APRÈS la fin** - pas de chevauchement
+✅ **Numéro de cycle** - pour suivre facilement
+
+## **Exemple de logs :**
+```
+================================================================================
+CYCLE #1 - 2026-02-13 10:30:00
+================================================================================
+
+[1/73] Initializing aswatson.com... .......... OK
+[2/73] Initializing aswatson.net... OK
+[3/73] Initializing parknshop.com... Error fetching crt.sh...
+...
+[73/73] Initializing watsons.com.tr... .......... OK
+
+================================================================================
+CYCLE #1 TERMINÉ - Durée: 245s (4m 5s)
+================================================================================
+
+Waiting 300 seconds before next cycle...
