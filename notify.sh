@@ -10,34 +10,38 @@ if [ ! -d "$RESULTS_DIR" ] || [ -z "$(find $RESULTS_DIR -type f -size +0 2>/dev/
     exit 0
 fi
 
-# Extraire tous les domaines
-DOMAINS=$(find "$RESULTS_DIR" -type f -exec cat {} \; 2>/dev/null | cut -d'|' -f1 | sort -u)
+# Extraire les données complètes (domain|dns_ip|http_status|dangling_flag)
+ALL_DATA=$(find "$RESULTS_DIR" -type f -exec cat {} \; 2>/dev/null | sort -u)
 
-if [ -z "$DOMAINS" ]; then
+if [ -z "$ALL_DATA" ]; then
     echo "ℹ️ No domains found"
     exit 0
 fi
 
 # Compter les domaines
-COUNT=$(echo "$DOMAINS" | wc -l)
+COUNT=$(echo "$ALL_DATA" | wc -l)
 
-# Compter les dangling
-DANGLING=$(find "$RESULTS_DIR" -type f -exec cat {} \; 2>/dev/null | grep -c "DANGLING" || echo "0")
+# Séparer par catégorie
+DANGLING=$(echo "$ALL_DATA" | grep "DANGLING" | cut -d'|' -f1)
+DANGLING_COUNT=$(echo "$DANGLING" | grep -c . || echo "0")
 
-# Compter les actifs (HTTP 200)
-ACTIVE=$(find "$RESULTS_DIR" -type f -exec cat {} \; 2>/dev/null | grep -E "\|20[0-9]\|" | wc -l || echo "0")
+ACTIVE=$(echo "$ALL_DATA" | grep -E "\|20[0-9]\|" | cut -d'|' -f1)
+ACTIVE_COUNT=$(echo "$ACTIVE" | grep -c . || echo "0")
+
+NXDOMAIN=$(echo "$ALL_DATA" | grep "N/A|N/A" | cut -d'|' -f1)
+NXDOMAIN_COUNT=$(echo "$NXDOMAIN" | grep -c . || echo "0")
+
+OTHERS=$(echo "$ALL_DATA" | grep -v "DANGLING" | grep -v -E "\|20[0-9]\|" | grep -v "N/A|N/A" | cut -d'|' -f1)
+OTHERS_COUNT=$(echo "$OTHERS" | grep -c . || echo "0")
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-# Sauvegarder les domaines dans un fichier temporaire
-echo "$DOMAINS" > /tmp/domains_list.txt
 
 # Message 1: Header avec stats
 cat > /tmp/payload1.json <<EOF
 {
   "embeds": [{
     "title": "🎯 New Subdomains Found",
-    "description": "**Total:** $COUNT\n**Dangling DNS:** $DANGLING\n**Active (HTTP 200):** $ACTIVE",
+    "description": "**Total:** $COUNT\n**✅ Active (HTTP 200):** $ACTIVE_COUNT\n**⚠️ Dangling DNS:** $DANGLING_COUNT\n**❌ Not Responding:** $NXDOMAIN_COUNT\n**🟡 Other Status:** $OTHERS_COUNT",
     "color": 65280,
     "footer": {"text": "Gungnir CT Monitor"},
     "timestamp": "$TIMESTAMP"
@@ -56,85 +60,169 @@ if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
     exit 1
 fi
 
-# Message 2+: Domaines par chunks (max 25 domaines par message)
-CHUNK_SIZE=25
-LINE_NUM=0
-CHUNK_NUM=1
-CHUNK_CONTENT=""
+sleep 1
 
-while IFS= read -r domain; do
-    if [ -z "$domain" ]; then
-        continue
-    fi
+# ===== MESSAGE 2: DANGLING DNS (PRIORITÉ) =====
+if [ "$DANGLING_COUNT" -gt 0 ]; then
+    CHUNK_NUM=2
     
-    # Ajouter le domaine avec backticks et newline
-    if [ -z "$CHUNK_CONTENT" ]; then
-        CHUNK_CONTENT="\`$domain\`"
-    else
-        CHUNK_CONTENT="$CHUNK_CONTENT\n\`$domain\`"
-    fi
+    echo "$DANGLING" | while read -r domain; do
+        if [ -z "$domain" ]; then
+            continue
+        fi
+        
+        # Chercher les détails dans les fichiers results
+        FULL_LINE=$(grep "^$domain|" "$RESULTS_DIR"/* 2>/dev/null | head -1)
+        DNS_IP=$(echo "$FULL_LINE" | cut -d'|' -f2)
+        HTTP_STATUS=$(echo "$FULL_LINE" | cut -d'|' -f3)
+        
+        echo "\`$domain\` (DNS: $DNS_IP, HTTP: $HTTP_STATUS)" >> /tmp/dangling.txt
+    done
     
-    LINE_NUM=$((LINE_NUM + 1))
-    
-    # Si on atteint la limite du chunk, envoyer
-    if [ $((LINE_NUM % CHUNK_SIZE)) -eq 0 ]; then
-        # Envoyer le chunk
+    if [ -f /tmp/dangling.txt ]; then
+        CHUNK_CONTENT=$(cat /tmp/dangling.txt | paste -sd '\n' -)
+        CHUNK_CONTENT=$(echo "$CHUNK_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/g' | tr -d '\n')
+        
         cat > /tmp/payload_chunk.json <<PAYLOAD
 {
   "embeds": [{
+    "title": "🔴 DANGLING DNS (TAKEOVER POSSIBLE)",
     "description": "$CHUNK_CONTENT",
-    "color": 65280,
+    "color": 16711680,
     "footer": {"text": "Gungnir CT Monitor - Part $CHUNK_NUM"}
   }]
 }
 PAYLOAD
         
-        HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
-            -X POST "$DISCORD_WEBHOOK" \
+        curl -s -X POST "$DISCORD_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d @/tmp/payload_chunk.json 2>/dev/null || echo "0")
+            -d @/tmp/payload_chunk.json > /dev/null 2>&1
         
-        if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Sent chunk $CHUNK_NUM ($LINE_NUM domains)"
-        else
-            echo "⚠️ Error chunk $CHUNK_NUM (HTTP $HTTP_CODE)"
-        fi
-        
-        # Reset pour prochain chunk
-        CHUNK_NUM=$((CHUNK_NUM + 1))
-        CHUNK_CONTENT=""
-        sleep 1  # Rate limit Discord
-    fi
-done < /tmp/domains_list.txt
-
-# Envoyer le dernier chunk s'il reste des domaines
-if [ -n "$CHUNK_CONTENT" ]; then
-    cat > /tmp/payload_chunk.json <<PAYLOAD
-{
-  "embeds": [{
-    "description": "$CHUNK_CONTENT",
-    "color": 65280,
-    "footer": {"text": "Gungnir CT Monitor - Part $CHUNK_NUM"}
-  }]
-}
-PAYLOAD
-    
-    HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
-        -X POST "$DISCORD_WEBHOOK" \
-        -H "Content-Type: application/json" \
-        -d @/tmp/payload_chunk.json 2>/dev/null || echo "0")
-    
-    if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
-        echo "✅ Sent chunk $CHUNK_NUM (final)"
-    else
-        echo "⚠️ Error chunk $CHUNK_NUM (HTTP $HTTP_CODE)"
+        echo "✅ Sent Dangling DNS ($DANGLING_COUNT)"
+        sleep 1
     fi
 fi
 
-echo "✅ Discord notification sent ($COUNT domains, $DANGLING dangling, $ACTIVE active)"
+# ===== MESSAGE 3: ACTIVE (HTTP 200) =====
+if [ "$ACTIVE_COUNT" -gt 0 ]; then
+    CHUNK_NUM=3
+    
+    echo "$ACTIVE" | while read -r domain; do
+        if [ -z "$domain" ]; then
+            continue
+        fi
+        
+        FULL_LINE=$(grep "^$domain|" "$RESULTS_DIR"/* 2>/dev/null | head -1)
+        DNS_IP=$(echo "$FULL_LINE" | cut -d'|' -f2)
+        HTTP_STATUS=$(echo "$FULL_LINE" | cut -d'|' -f3)
+        
+        echo "\`$domain\` (DNS: $DNS_IP, HTTP: $HTTP_STATUS)" >> /tmp/active.txt
+    done
+    
+    if [ -f /tmp/active.txt ]; then
+        CHUNK_CONTENT=$(cat /tmp/active.txt | paste -sd '\n' -)
+        CHUNK_CONTENT=$(echo "$CHUNK_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/g' | tr -d '\n')
+        
+        cat > /tmp/payload_chunk.json <<PAYLOAD
+{
+  "embeds": [{
+    "title": "✅ ACTIVE (HTTP 200)",
+    "description": "$CHUNK_CONTENT",
+    "color": 65280,
+    "footer": {"text": "Gungnir CT Monitor - Part $CHUNK_NUM"}
+  }]
+}
+PAYLOAD
+        
+        curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload_chunk.json > /dev/null 2>&1
+        
+        echo "✅ Sent Active domains ($ACTIVE_COUNT)"
+        sleep 1
+    fi
+fi
+
+# ===== MESSAGE 4: OTHER STATUS (403, 404, 500, etc) =====
+if [ "$OTHERS_COUNT" -gt 0 ]; then
+    CHUNK_NUM=4
+    
+    echo "$OTHERS" | while read -r domain; do
+        if [ -z "$domain" ]; then
+            continue
+        fi
+        
+        FULL_LINE=$(grep "^$domain|" "$RESULTS_DIR"/* 2>/dev/null | head -1)
+        DNS_IP=$(echo "$FULL_LINE" | cut -d'|' -f2)
+        HTTP_STATUS=$(echo "$FULL_LINE" | cut -d'|' -f3)
+        
+        echo "\`$domain\` (DNS: $DNS_IP, HTTP: $HTTP_STATUS)" >> /tmp/others.txt
+    done
+    
+    if [ -f /tmp/others.txt ]; then
+        CHUNK_CONTENT=$(cat /tmp/others.txt | paste -sd '\n' -)
+        CHUNK_CONTENT=$(echo "$CHUNK_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/g' | tr -d '\n')
+        
+        cat > /tmp/payload_chunk.json <<PAYLOAD
+{
+  "embeds": [{
+    "title": "🟡 OTHER STATUS (403, 404, 500, etc)",
+    "description": "$CHUNK_CONTENT",
+    "color": 16776960,
+    "footer": {"text": "Gungnir CT Monitor - Part $CHUNK_NUM"}
+  }]
+}
+PAYLOAD
+        
+        curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload_chunk.json > /dev/null 2>&1
+        
+        echo "✅ Sent Other status domains ($OTHERS_COUNT)"
+        sleep 1
+    fi
+fi
+
+# ===== MESSAGE 5: NOT RESPONDING (DNS OK but no HTTP) =====
+if [ "$NXDOMAIN_COUNT" -gt 0 ]; then
+    CHUNK_NUM=5
+    
+    echo "$NXDOMAIN" | while read -r domain; do
+        if [ -z "$domain" ]; then
+            continue
+        fi
+        
+        echo "\`$domain\`" >> /tmp/nxdomain.txt
+    done
+    
+    if [ -f /tmp/nxdomain.txt ]; then
+        CHUNK_CONTENT=$(cat /tmp/nxdomain.txt | paste -sd '\n' -)
+        CHUNK_CONTENT=$(echo "$CHUNK_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/g' | tr -d '\n')
+        
+        cat > /tmp/payload_chunk.json <<PAYLOAD
+{
+  "embeds": [{
+    "title": "❌ NOT RESPONDING (NXDOMAIN)",
+    "description": "$CHUNK_CONTENT",
+    "color": 16711680,
+    "footer": {"text": "Gungnir CT Monitor - Part $CHUNK_NUM"}
+  }]
+}
+PAYLOAD
+        
+        curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload_chunk.json > /dev/null 2>&1
+        
+        echo "✅ Sent NXDOMAIN ($NXDOMAIN_COUNT)"
+        sleep 1
+    fi
+fi
+
+echo "✅ All notifications sent"
 
 # Cleanup results
 find "$RESULTS_DIR" -type f ! -name ".gitkeep" -exec sh -c '> "$1"' _ {} \;
 
 # Cleanup temp
-rm -f /tmp/payload*.json /tmp/response.txt /tmp/domains_list.txt
+rm -f /tmp/payload*.json /tmp/response.txt /tmp/dangling.txt /tmp/active.txt /tmp/others.txt /tmp/nxdomain.txt
