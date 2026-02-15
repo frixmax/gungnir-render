@@ -5,12 +5,10 @@ import time
 import os
 import sys
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DOMAINS_FILE = 'domains.txt'
 OUTPUT_DIR = 'results'
 FIRST_RUN_FILE = '/app/.first_run_complete'
-CHECK_INTERVAL = 300  # 5 min
 SEEN_FILE = '/app/seen_domains.txt'
 
 # Vérifications au démarrage
@@ -72,18 +70,15 @@ def check_http(domain, timeout=5):
 def detect_dangling(domain, dns_ip, http_status, http_error):
     """
     Dangling DNS = DNS résout mais HTTP ne répond pas
-    Indicateurs:
-      - DNS OK + HTTP timeout
-      - DNS OK + HTTP connection refused
     """
     if dns_ip is None:
-        return False  # DNS ne résout pas
+        return False
     
     if http_status is not None:
-        return False  # HTTP répond (quelque soit le status)
+        return False
     
     if http_error in ['timeout', 'refused']:
-        return True  # DNS OK mais HTTP down = Dangling!
+        return True
     
     return False
 
@@ -236,8 +231,7 @@ def monitor_loop():
                 if ret != 0:
                     print(f"⚠️ notify.sh error code: {ret}", file=sys.stderr, flush=True)
             
-            print(f"💤 Waiting {CHECK_INTERVAL}s...", flush=True)
-            time.sleep(CHECK_INTERVAL)
+            print(f"⚡ Next cycle starts now...", flush=True)
             
         except KeyboardInterrupt:
             print("\n⚠️ Stopping...", flush=True)
